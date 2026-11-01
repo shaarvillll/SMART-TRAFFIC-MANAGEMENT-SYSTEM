@@ -1,0 +1,79 @@
+# ==========================================
+# Java / Maven Exclusions
+# ==========================================
+**/target/
+target/
+*.class
+*.war
+*.nar
+*.ear
+
+# Local developer classpath dumps and logs
+*_cp.txt
+traffic_simulation/javafx_cp.txt
+
+# Obsolete / Duplicate workspaces and folders
+Backend/
+finalTrafficManagement/
+
+# ==========================================
+# Flutter / Dart Exclusions
+# ==========================================
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+.pub-cache/
+.pub/
+**/build/
+build/
+**/doc/api/
+**/ios/Flutter/.last_build_id
+
+# ==========================================
+# Android Native Exclusions
+# ==========================================
+**/android/.gradle/
+**/android/.kotlin/
+**/android/captures/
+**/android/local.properties
+local.properties
+**/android/**/GeneratedPluginRegistrant.java
+
+# Android release signing credentials (never commit secrets)
+key.properties
+*.keystore
+*.jks
+
+# NOTE: The Gradle wrapper files are explicitly tracked:
+# - android/gradlew
+# - android/gradlew.bat
+# - android/gradle/wrapper/gradle-wrapper.jar
+# - android/gradle/wrapper/gradle-wrapper.properties
+
+# ==========================================
+# IDEs, OS & Logs
+# ==========================================
+.DS_Store
+**/.DS_Store
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+*.log
+*.err
+.atom/
+.buildlog/
+.history
+.svn/
+migrate_working_dir/
+
+# ==========================================
+# Unnecessary Root Screenshots
+# ==========================================
+/*.png
+p[1-6].png
+phone_*.png
+screen_*.png
+!assets/**

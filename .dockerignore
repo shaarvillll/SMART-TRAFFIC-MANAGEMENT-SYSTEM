@@ -1,0 +1,46 @@
+.git/
+.gitignore
+README.md
+
+# Flutter / Dart
+build/
+**/build/
+.dart_tool/
+lib/
+test/
+pubspec.yaml
+pubspec.lock
+analysis_options.yaml
+assets/
+
+# Android
+android/
+
+# Duplicate / Obsolete workspaces
+Backend/
+finalTrafficManagement/
+
+# Desktop source and local artifacts (not packaged in container)
+traffic_simulation/traffic-desktop/src/
+traffic_simulation/traffic-desktop/map_preview.png
+traffic_simulation/javafx_cp.txt
+traffic_simulation/map_preview.png
+traffic_simulation/BluePrint*.docx
+traffic_simulation/*.bat
+*.bat
+
+# Maven target directories
+**/target/
+target/
+
+# Logs and system files
+*.log
+*.err
+.DS_Store
+**/.DS_Store
+.idea/
+.vscode/
+*.iml
+
+# Screenshots
+*.png
