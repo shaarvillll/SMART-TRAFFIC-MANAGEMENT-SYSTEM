@@ -14,6 +14,7 @@ import com.traffic.core.vehicle.VehicleStatus;
 import com.traffic.core.vehicle.VehicleType;
 import com.traffic.desktop.renderer.MapCanvasRenderer;
 import javafx.application.Application;
+import javafx.application.Platform;
 import javafx.geometry.Insets;
 import javafx.geometry.Pos;
 import javafx.scene.Scene;
@@ -33,7 +34,9 @@ import javafx.scene.text.Font;
 import javafx.scene.text.FontWeight;
 import javafx.stage.Stage;
 
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Intelligent Traffic Desktop Simulator:
@@ -42,9 +45,25 @@ import java.util.List;
  * - Dijkstra Shortest-Path Dynamic Routing.
  * - Multi-Vehicle Movement & Anti-Collision Car Following.
  * - Interactive Trip Dispatcher & Live Vehicle Fleet HUD.
+ *
+ * BACKEND INTEGRATION (v2):
+ * When connected to the deployed backend, the desktop acts as a second client
+ * of the same simulation that Flutter uses. Vehicle positions, signals, and road
+ * states all come from the backend WebSocket (/ws/live). Spawning a vehicle POSTs
+ * to /api/spawn and the vehicle immediately appears in both the desktop AND Flutter.
+ * When the backend is unreachable, falls back to the original local simulation.
  */
 public class TrafficDesktopApp extends Application {
 
+    // ─── Backend integration ────────────────────────────────────────────────────
+    /** Override via -DBACKEND_URL=... JVM arg or BACKEND_URL system property. */
+    private BackendClient backendClient;
+    private volatile boolean isConnectedToBackend = false;
+    // Ghost vehicles from backend WS (connected mode)
+    private volatile List<GhostVehicle> ghostVehicles = new ArrayList<>();
+    private volatile String selectedGhostId = null;
+
+    // ─── Local simulation (offline fallback) ───────────────────────────────────
     private CityMap cityMap;
     private TrafficSignalController signalController;
     private RouteFinder routeFinder;
@@ -58,7 +77,7 @@ public class TrafficDesktopApp extends Application {
     private double timeSpeed = 1.0;
     private Label clockLabel;
 
-    // Vehicle trip selection state
+    // Vehicle trip selection state (used in both modes)
     private Vehicle selectedVehicle = null;
     private Route previewRoute = null;
 
@@ -72,6 +91,9 @@ public class TrafficDesktopApp extends Application {
     private Button startTripBtn;
     private VBox vehicleListContainer;
     private long lastUiUpdateNano = 0L;
+
+    // Connection status label in header
+    private Label connectionStatusLabel;
 
     @Override
     public void start(Stage primaryStage) {
@@ -112,7 +134,7 @@ public class TrafficDesktopApp extends Application {
         root.setRight(sidebarScroll);
 
         Scene scene = new Scene(root, 1420, 960);
-        primaryStage.setTitle("Intelligent Traffic Simulator - Signals, Dijkstra Routing & Vehicles");
+        primaryStage.setTitle("Intelligent Traffic Simulator — Connected to Live Backend");
         primaryStage.setScene(scene);
         primaryStage.setResizable(true);
         primaryStage.setMinWidth(960);
@@ -120,6 +142,7 @@ public class TrafficDesktopApp extends Application {
 
         primaryStage.setOnCloseRequest(e -> {
             if (animationTimer != null) animationTimer.stop();
+            if (backendClient != null) backendClient.disconnect();
         });
 
         primaryStage.show();
@@ -127,14 +150,86 @@ public class TrafficDesktopApp extends Application {
         // Initialize default route preview (e.g. J1 to J10)
         onRouteSelectionChanged();
 
-        // Start deterministic simulation clock loop
-        startSimulationClock();
+        // Start the local AnimationTimer for rendering (always runs; vehicles come from backend or local)
+        startRenderLoop();
 
-        // Export screenshot so it can be previewed directly
+        // Export screenshot for preview
         exportMapImage();
+
+        // Try to connect to the backend (async, non-blocking)
+        connectToBackend();
     }
 
-    private void startSimulationClock() {
+    // ─── Backend connection ─────────────────────────────────────────────────────
+
+    private void connectToBackend() {
+        String url = BackendClient.DEFAULT_BACKEND_URL;
+        setConnectionStatus("Connecting to backend…", "#f59e0b");
+        backendClient = new BackendClient(url);
+
+        backendClient.setOnStatusChange(status -> Platform.runLater(() -> {
+            switch (status) {
+                case CONNECTED -> setConnectionStatus("● Live Backend Connected", "#10b981");
+                case CONNECTING -> setConnectionStatus("◌ Connecting…", "#f59e0b");
+                case DISCONNECTED -> {
+                    setConnectionStatus("○ Backend Disconnected (local mode)", "#ef4444");
+                    isConnectedToBackend = false;
+                    ghostVehicles = new ArrayList<>();
+                }
+                case ERROR -> {
+                    setConnectionStatus("✗ Backend Error (local mode)", "#ef4444");
+                    isConnectedToBackend = false;
+                }
+            }
+        }));
+
+        backendClient.setOnLiveUpdate(snap -> {
+            // Apply signals to local CityMap (for rendering)
+            backendClient.applySignals(cityMap, snap.signals());
+            // Apply road conditions
+            backendClient.applyRoadConditions(cityMap, snap.roads());
+            // Convert remote vehicles to ghost vehicles
+            List<GhostVehicle> newGhosts = backendClient.toGhostVehicles(cityMap, snap.vehicles());
+            ghostVehicles = newGhosts;
+            // Update clock label from backend simulation time
+            Platform.runLater(() -> {
+                if (clockLabel != null) {
+                    double t = snap.simulationTime();
+                    int mins = (int) (t / 60);
+                    double secs = t % 60;
+                    clockLabel.setText(String.format("Clock: %02d:%04.1fs [Backend]", mins, secs));
+                }
+                // Throttle UI list update
+                updateGhostVehicleListUI();
+            });
+        });
+
+        backendClient.connect().thenAccept(ok -> {
+            if (ok) {
+                isConnectedToBackend = true;
+                Platform.runLater(() -> setConnectionStatus("● Live Backend Connected", "#10b981"));
+                System.out.println("[Desktop] Connected to backend: " + url);
+                // Pause local simulation engine (signals/vehicles handled by backend now)
+                isPaused = true;
+            } else {
+                System.out.println("[Desktop] Backend unreachable → running in local mode");
+                Platform.runLater(() -> setConnectionStatus("○ Local Simulation (Backend Offline)", "#64748b"));
+                // Local simulation remains active
+                isPaused = false;
+            }
+        });
+    }
+
+    private void setConnectionStatus(String text, String colorHex) {
+        if (connectionStatusLabel != null) {
+            connectionStatusLabel.setText(text);
+            connectionStatusLabel.setTextFill(Color.web(colorHex));
+        }
+    }
+
+    // ─── Render loop ────────────────────────────────────────────────────────────
+
+    private void startRenderLoop() {
         final long[] lastNano = { System.nanoTime() };
 
         animationTimer = new javafx.animation.AnimationTimer() {
@@ -143,15 +238,14 @@ public class TrafficDesktopApp extends Application {
                 long elapsedNano = now - lastNano[0];
                 lastNano[0] = now;
 
-                if (!isPaused) {
+                if (!isPaused && !isConnectedToBackend) {
+                    // Local simulation mode: advance physics locally
                     double deltaSec = (elapsedNano / 1_000_000_000.0) * timeSpeed;
                     if (deltaSec > 0.2) deltaSec = 0.2;
 
-                    // Advance traffic signals and vehicle positions along the shared clock
                     signalController.step(deltaSec);
                     vehicleManager.step(deltaSec, signalController);
 
-                    redraw();
                     updateClockDisplay();
 
                     // Throttle UI list updates (5 times per second)
@@ -160,13 +254,16 @@ public class TrafficDesktopApp extends Application {
                         updateVehicleListUI();
                     }
                 }
+
+                // Always redraw (backend mode: ghosts are updated via WS callback)
+                redraw();
             }
         };
         animationTimer.start();
     }
 
     private void updateClockDisplay() {
-        if (clockLabel != null) {
+        if (clockLabel != null && !isConnectedToBackend) {
             double t = signalController.getSimulationTime();
             int mins = (int) (t / 60);
             double secs = t % 60;
@@ -175,7 +272,7 @@ public class TrafficDesktopApp extends Application {
     }
 
     private void exportMapImage() {
-        javafx.application.Platform.runLater(() -> {
+        Platform.runLater(() -> {
             try {
                 javafx.scene.image.WritableImage image = canvas.snapshot(null, null);
                 java.io.File file = new java.io.File("map_preview.png");
@@ -187,6 +284,24 @@ public class TrafficDesktopApp extends Application {
             }
         });
     }
+
+    // ─── Redraw ─────────────────────────────────────────────────────────────────
+
+    private void redraw() {
+        if (isConnectedToBackend) {
+            // Connected mode: render ghost vehicles from backend
+            renderer.renderWithGhosts(canvas.getGraphicsContext2D(), cityMap,
+                    ghostVehicles, selectedGhostId, previewRoute,
+                    canvas.getWidth(), canvas.getHeight());
+        } else {
+            // Local mode: render local Vehicle objects
+            renderer.render(canvas.getGraphicsContext2D(), cityMap,
+                    vehicleManager.getVehicles(), selectedVehicle, previewRoute,
+                    canvas.getWidth(), canvas.getHeight());
+        }
+    }
+
+    // ─── Header ─────────────────────────────────────────────────────────────────
 
     private VBox createHeader() {
         VBox header = new VBox(4);
@@ -201,9 +316,15 @@ public class TrafficDesktopApp extends Application {
         subtitle.setFont(Font.font("Segoe UI", 12));
         subtitle.setTextFill(Color.web("#94a3b8"));
 
-        header.getChildren().addAll(title, subtitle);
+        connectionStatusLabel = new Label("◌ Initialising…");
+        connectionStatusLabel.setFont(Font.font("Segoe UI", FontWeight.BOLD, 11));
+        connectionStatusLabel.setTextFill(Color.web("#94a3b8"));
+
+        header.getChildren().addAll(title, subtitle, connectionStatusLabel);
         return header;
     }
+
+    // ─── Sidebar ────────────────────────────────────────────────────────────────
 
     private VBox createSidebar() {
         VBox sidebar = new VBox(14);
@@ -211,16 +332,9 @@ public class TrafficDesktopApp extends Application {
         sidebar.setPrefWidth(340);
         sidebar.setStyle("-fx-background-color: #111827;");
 
-        // 1. Simulation Controls
         VBox simBox = createSimulationControlsBox();
-
-        // 2. Add Vehicle Trip (Dijkstra Routing)
         VBox addVehicleBox = createAddVehicleBox();
-
-        // 3. Active Vehicles & Trips List
         VBox activeVehiclesBox = createActiveVehiclesBox();
-
-        // 4. Network Specifications & Legend
         VBox specsBox = createSpecsAndLegendBox();
 
         sidebar.getChildren().addAll(simBox, createSeparator(), addVehicleBox, createSeparator(), activeVehiclesBox);
@@ -242,8 +356,16 @@ public class TrafficDesktopApp extends Application {
         Button pauseBtn = new Button("Pause");
         pauseBtn.setStyle("-fx-background-color: #334155; -fx-text-fill: white; -fx-cursor: hand; -fx-font-weight: bold;");
         pauseBtn.setOnAction(e -> {
-            isPaused = !isPaused;
-            pauseBtn.setText(isPaused ? "Resume" : "Pause");
+            if (isConnectedToBackend) {
+                // Toggle pause state on backend
+                boolean newPaused = !isPaused;
+                isPaused = newPaused;
+                pauseBtn.setText(newPaused ? "Resume" : "Pause");
+                backendClient.sendControl(newPaused ? "pause" : "resume");
+            } else {
+                isPaused = !isPaused;
+                pauseBtn.setText(isPaused ? "Resume" : "Pause");
+            }
         });
 
         Button speedBtn = new Button("Speed: 1x");
@@ -259,16 +381,26 @@ public class TrafficDesktopApp extends Application {
                 timeSpeed = 1.0;
                 speedBtn.setText("Speed: 1x");
             }
+            if (isConnectedToBackend) {
+                backendClient.sendControl("speed", timeSpeed);
+            }
         });
 
         Button resetBtn = new Button("Reset");
         resetBtn.setStyle("-fx-background-color: #ef4444; -fx-text-fill: white; -fx-cursor: hand; -fx-font-weight: bold;");
         resetBtn.setOnAction(e -> {
-            signalController.reset();
-            vehicleManager.clearVehicles();
-            selectedVehicle = null;
-            updateClockDisplay();
-            updateVehicleListUI();
+            if (isConnectedToBackend) {
+                backendClient.sendControl("reset");
+                ghostVehicles = new ArrayList<>();
+                selectedGhostId = null;
+                updateGhostVehicleListUI();
+            } else {
+                signalController.reset();
+                vehicleManager.clearVehicles();
+                selectedVehicle = null;
+                updateClockDisplay();
+                updateVehicleListUI();
+            }
             redraw();
         });
 
@@ -284,7 +416,6 @@ public class TrafficDesktopApp extends Application {
         title.setFont(Font.font("Segoe UI", FontWeight.BOLD, 13));
         title.setTextFill(Color.web("#e2e8f0"));
 
-        // Vehicle Type Selector
         Label typeLbl = new Label("Vehicle Type:");
         typeLbl.setFont(Font.font("Segoe UI", 11));
         typeLbl.setTextFill(Color.web("#94a3b8"));
@@ -295,7 +426,6 @@ public class TrafficDesktopApp extends Application {
         vehicleTypeCombo.setMaxWidth(Double.MAX_VALUE);
         vehicleTypeCombo.setStyle("-fx-background-color: #1e293b; -fx-text-fill: white;");
 
-        // Source Junction Selector
         Label srcLbl = new Label("Source Intersection:");
         srcLbl.setFont(Font.font("Segoe UI", 11));
         srcLbl.setTextFill(Color.web("#94a3b8"));
@@ -306,7 +436,6 @@ public class TrafficDesktopApp extends Application {
         sourceCombo.setMaxWidth(Double.MAX_VALUE);
         sourceCombo.setStyle("-fx-background-color: #1e293b; -fx-text-fill: white;");
 
-        // Destination Junction Selector
         Label destLbl = new Label("Destination Intersection:");
         destLbl.setFont(Font.font("Segoe UI", 11));
         destLbl.setTextFill(Color.web("#94a3b8"));
@@ -317,11 +446,9 @@ public class TrafficDesktopApp extends Application {
         destinationCombo.setMaxWidth(Double.MAX_VALUE);
         destinationCombo.setStyle("-fx-background-color: #1e293b; -fx-text-fill: white;");
 
-        // Listeners for dynamic route calculation and preview
         sourceCombo.valueProperty().addListener((obs, oldVal, newVal) -> onRouteSelectionChanged());
         destinationCombo.valueProperty().addListener((obs, oldVal, newVal) -> onRouteSelectionChanged());
 
-        // Route Preview Card
         VBox previewCard = new VBox(4);
         previewCard.setPadding(new Insets(8));
         previewCard.setStyle("-fx-background-color: #0f172a; -fx-border-color: #1e293b; -fx-border-radius: 4; -fx-background-radius: 4;");
@@ -341,7 +468,6 @@ public class TrafficDesktopApp extends Application {
 
         previewCard.getChildren().addAll(routePreviewLabel, routeDistanceLabel, routeStatusLabel);
 
-        // Start Trip Button
         startTripBtn = new Button("🚀 Start Trip");
         startTripBtn.setMaxWidth(Double.MAX_VALUE);
         startTripBtn.setStyle("-fx-background-color: #0ea5e9; -fx-text-fill: white; -fx-font-weight: bold; -fx-cursor: hand; -fx-padding: 8;");
@@ -364,9 +490,16 @@ public class TrafficDesktopApp extends Application {
         Button clearBtn = new Button("Clear All");
         clearBtn.setStyle("-fx-background-color: #334155; -fx-text-fill: #cbd5e1; -fx-font-size: 10px; -fx-cursor: hand;");
         clearBtn.setOnAction(e -> {
-            vehicleManager.clearVehicles();
-            selectedVehicle = null;
-            updateVehicleListUI();
+            if (isConnectedToBackend) {
+                backendClient.sendControl("reset");
+                ghostVehicles = new ArrayList<>();
+                selectedGhostId = null;
+                updateGhostVehicleListUI();
+            } else {
+                vehicleManager.clearVehicles();
+                selectedVehicle = null;
+                updateVehicleListUI();
+            }
             redraw();
         });
 
@@ -378,6 +511,8 @@ public class TrafficDesktopApp extends Application {
         box.getChildren().addAll(header, vehicleListContainer);
         return box;
     }
+
+    // ─── Vehicle list UI ────────────────────────────────────────────────────────
 
     private void updateVehicleListUI() {
         if (vehicleListContainer == null) return;
@@ -395,12 +530,33 @@ public class TrafficDesktopApp extends Application {
 
         vehicleListContainer.getChildren().clear();
         for (Vehicle v : list) {
-            VBox card = createVehicleCard(v);
+            VBox card = createLocalVehicleCard(v);
             vehicleListContainer.getChildren().add(card);
         }
     }
 
-    private VBox createVehicleCard(Vehicle v) {
+    /** Update the vehicle list UI from ghost vehicles (backend connected mode). */
+    private void updateGhostVehicleListUI() {
+        if (vehicleListContainer == null) return;
+        List<GhostVehicle> list = ghostVehicles;
+
+        vehicleListContainer.getChildren().clear();
+        if (list.isEmpty()) {
+            Label emptyLbl = new Label("No vehicles active.\nSpawn one below — it will appear here and in the Flutter app.");
+            emptyLbl.setWrapText(true);
+            emptyLbl.setFont(Font.font("Segoe UI", 11));
+            emptyLbl.setTextFill(Color.web("#64748b"));
+            vehicleListContainer.getChildren().add(emptyLbl);
+            return;
+        }
+
+        for (GhostVehicle gv : list) {
+            VBox card = createGhostVehicleCard(gv);
+            vehicleListContainer.getChildren().add(card);
+        }
+    }
+
+    private VBox createLocalVehicleCard(Vehicle v) {
         VBox card = new VBox(4);
         card.setPadding(new Insets(6, 8, 6, 8));
 
@@ -408,7 +564,6 @@ public class TrafficDesktopApp extends Application {
         String borderCol = isSelected ? "#38bdf8" : "#334155";
         card.setStyle("-fx-background-color: #1e293b; -fx-border-color: " + borderCol + "; -fx-border-radius: 4; -fx-background-radius: 4; -fx-cursor: hand;");
 
-        // Top Row: ID, Type badge, and Status
         HBox topRow = new HBox(6);
         topRow.setAlignment(Pos.CENTER_LEFT);
 
@@ -417,13 +572,13 @@ public class TrafficDesktopApp extends Application {
         idLbl.setTextFill(Color.web(v.getType().getColorHex()));
         HBox.setHgrow(idLbl, Priority.ALWAYS);
 
-        String statusColor = "#10b981"; // Green for Moving
+        String statusColor = "#10b981";
         if (v.getStatus() == VehicleStatus.STOPPED_AT_SIGNAL) {
-            statusColor = "#ef4444"; // Red for Signal Stop
+            statusColor = "#ef4444";
         } else if (v.getStatus() == VehicleStatus.WAITING) {
-            statusColor = "#f59e0b"; // Amber for Spacing Wait
+            statusColor = "#f59e0b";
         } else if (v.getStatus() == VehicleStatus.COMPLETED) {
-            statusColor = "#64748b"; // Slate for Finished
+            statusColor = "#64748b";
         }
 
         Label statusLbl = new Label(v.getStatus().getLabel());
@@ -432,12 +587,10 @@ public class TrafficDesktopApp extends Application {
 
         topRow.getChildren().addAll(idLbl, statusLbl);
 
-        // Path Label
-        Label pathLbl = new Label(v.getSource().getId() + " \u2192 " + v.getDestination().getId() + " • " + String.format("%.0f%%", v.getProgressPercentage()));
+        Label pathLbl = new Label(v.getSource().getId() + " → " + v.getDestination().getId() + " • " + String.format("%.0f%%", v.getProgressPercentage()));
         pathLbl.setFont(Font.font("Segoe UI", 10.5));
         pathLbl.setTextFill(Color.web("#94a3b8"));
 
-        // Progress Bar
         ProgressBar pBar = new ProgressBar(v.getProgressPercentage() / 100.0);
         pBar.setMaxWidth(Double.MAX_VALUE);
         pBar.setPrefHeight(4);
@@ -447,7 +600,7 @@ public class TrafficDesktopApp extends Application {
 
         card.setOnMouseClicked(e -> {
             selectedVehicle = v;
-            previewRoute = null; // Prioritize selected vehicle's route highlight
+            previewRoute = null;
             updateVehicleListUI();
             redraw();
         });
@@ -455,12 +608,67 @@ public class TrafficDesktopApp extends Application {
         return card;
     }
 
+    private VBox createGhostVehicleCard(GhostVehicle gv) {
+        VBox card = new VBox(4);
+        card.setPadding(new Insets(6, 8, 6, 8));
+
+        boolean isSelected = gv.getId().equals(selectedGhostId);
+        String borderCol = isSelected ? "#38bdf8" : "#334155";
+        card.setStyle("-fx-background-color: #1e293b; -fx-border-color: " + borderCol + "; -fx-border-radius: 4; -fx-background-radius: 4; -fx-cursor: hand;");
+
+        HBox topRow = new HBox(6);
+        topRow.setAlignment(Pos.CENTER_LEFT);
+
+        Label idLbl = new Label(gv.getId() + " (" + gv.getType().getDisplayName() + ")");
+        idLbl.setFont(Font.font("Segoe UI", FontWeight.BOLD, 11));
+        idLbl.setTextFill(Color.web(gv.getType().getColorHex()));
+        HBox.setHgrow(idLbl, Priority.ALWAYS);
+
+        String statusColor;
+        String statusText;
+        switch (gv.getStatus()) {
+            case STOPPED_AT_SIGNAL -> { statusColor = "#ef4444"; statusText = "At Signal"; }
+            case COMPLETED         -> { statusColor = "#64748b"; statusText = "Arrived"; }
+            case WAITING           -> { statusColor = "#f59e0b"; statusText = "Waiting"; }
+            default                -> { statusColor = "#10b981"; statusText = "Moving"; }
+        }
+
+        Label statusLbl = new Label(statusText);
+        statusLbl.setFont(Font.font("Segoe UI", FontWeight.BOLD, 9.5));
+        statusLbl.setTextFill(Color.web(statusColor));
+
+        topRow.getChildren().addAll(idLbl, statusLbl);
+
+        String src  = gv.getSource()      != null ? gv.getSource().getId()      : gv.getRoutePath().isEmpty() ? "?" : gv.getRoutePath().get(0);
+        String dest = gv.getDestination() != null ? gv.getDestination().getId() : gv.getRoutePath().isEmpty() ? "?" : gv.getRoutePath().get(gv.getRoutePath().size() - 1);
+        Label pathLbl = new Label(src + " → " + dest + " • " + String.format("%.0f%%", gv.getProgressPercent()));
+        pathLbl.setFont(Font.font("Segoe UI", 10.5));
+        pathLbl.setTextFill(Color.web("#94a3b8"));
+
+        ProgressBar pBar = new ProgressBar(gv.getProgressPercent() / 100.0);
+        pBar.setMaxWidth(Double.MAX_VALUE);
+        pBar.setPrefHeight(4);
+        pBar.setStyle("-fx-accent: " + gv.getType().getColorHex() + ";");
+
+        card.getChildren().addAll(topRow, pathLbl, pBar);
+
+        card.setOnMouseClicked(e -> {
+            selectedGhostId = gv.getId();
+            updateGhostVehicleListUI();
+            redraw();
+        });
+
+        return card;
+    }
+
+    // ─── Route selection & trip spawning ────────────────────────────────────────
+
     private void onRouteSelectionChanged() {
-        String srcItem = (sourceCombo != null) ? sourceCombo.getValue() : "J1";
+        String srcItem  = (sourceCombo      != null) ? sourceCombo.getValue()      : "J1";
         String destItem = (destinationCombo != null) ? destinationCombo.getValue() : "J10";
         if (srcItem == null || destItem == null) return;
 
-        String srcId = extractJunctionId(srcItem);
+        String srcId  = extractJunctionId(srcItem);
         String destId = extractJunctionId(destItem);
 
         if (srcId.equals(destId)) {
@@ -500,21 +708,43 @@ public class TrafficDesktopApp extends Application {
     }
 
     private void onStartTripClicked() {
-        if (previewRoute == null || !previewRoute.isValid() || previewRoute.isEmpty()) {
-            return;
-        }
-
+        String srcId  = extractJunctionId(sourceCombo.getValue());
+        String destId = extractJunctionId(destinationCombo.getValue());
         VehicleType type = vehicleTypeCombo.getValue();
         if (type == null) type = VehicleType.CAR;
 
-        Intersection src = previewRoute.getSource();
-        Intersection dest = previewRoute.getDestination();
-
-        Vehicle vehicle = vehicleManager.spawnVehicle(type, src, dest, previewRoute);
-        selectedVehicle = vehicle;
-        updateVehicleListUI();
-        redraw();
+        if (isConnectedToBackend) {
+            // POST to backend — vehicle will appear in both Flutter and this desktop
+            final VehicleType finalType = type;
+            final String fSrc = srcId, fDest = destId;
+            startTripBtn.setDisable(true);
+            startTripBtn.setText("Spawning…");
+            new Thread(() -> {
+                Map<String, Object> result = backendClient.spawnVehicle(finalType.name(), fSrc, fDest);
+                Platform.runLater(() -> {
+                    startTripBtn.setDisable(false);
+                    startTripBtn.setText("🚀 Start Trip");
+                    if (result != null) {
+                        System.out.println("[Desktop] Vehicle spawned on backend: " + result.get("id"));
+                    } else {
+                        routeStatusLabel.setText("❌ Spawn failed — check backend.");
+                        routeStatusLabel.setTextFill(Color.web("#f43f5e"));
+                    }
+                });
+            }, "spawn-thread").start();
+        } else {
+            // Local simulation: spawn locally
+            if (previewRoute == null || !previewRoute.isValid() || previewRoute.isEmpty()) return;
+            Intersection src  = previewRoute.getSource();
+            Intersection dest = previewRoute.getDestination();
+            Vehicle vehicle = vehicleManager.spawnVehicle(type, src, dest, previewRoute);
+            selectedVehicle = vehicle;
+            updateVehicleListUI();
+            redraw();
+        }
     }
+
+    // ─── Helpers ────────────────────────────────────────────────────────────────
 
     private void populateJunctionCombo(ComboBox<String> combo) {
         for (Intersection node : cityMap.getIntersections().values()) {
@@ -577,10 +807,6 @@ public class TrafficDesktopApp extends Application {
         return sep;
     }
 
-    private void redraw() {
-        renderer.render(canvas.getGraphicsContext2D(), cityMap, vehicleManager.getVehicles(), selectedVehicle, previewRoute, canvas.getWidth(), canvas.getHeight());
-    }
-
     private HBox createStatRow(String label, String value) {
         HBox row = new HBox();
         row.setAlignment(Pos.CENTER_LEFT);
@@ -604,12 +830,12 @@ public class TrafficDesktopApp extends Application {
 
         String hex;
         switch (lm.getType()) {
-            case HOSPITAL: hex = "#ef4444"; break;
+            case HOSPITAL:        hex = "#ef4444"; break;
             case RAILWAY_STATION: hex = "#06b6d4"; break;
-            case CITY_CENTER: hex = "#8b5cf6"; break;
-            case SHOPPING_MALL: hex = "#f59e0b"; break;
-            case UNIVERSITY: hex = "#10b981"; break;
-            default: hex = "#64748b"; break;
+            case CITY_CENTER:     hex = "#8b5cf6"; break;
+            case SHOPPING_MALL:   hex = "#f59e0b"; break;
+            case UNIVERSITY:      hex = "#10b981"; break;
+            default:              hex = "#64748b"; break;
         }
 
         javafx.scene.shape.Circle dot = new javafx.scene.shape.Circle(5, Color.web(hex));

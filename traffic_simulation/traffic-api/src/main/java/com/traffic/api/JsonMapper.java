@@ -63,6 +63,7 @@ public class JsonMapper {
         m.put("destinationName", v.getDestination().getName());
         m.put("x", Math.round(v.getX() * 10.0) / 10.0);
         m.put("y", Math.round(v.getY() * 10.0) / 10.0);
+        m.put("headingAngle", Math.round(v.getHeadingAngle() * 1000.0) / 1000.0);
         m.put("speed", Math.round(v.getCurrentSpeed() * 10.0) / 10.0);
         m.put("progressPercent", Math.round(v.getProgressPercentage() * 10.0) / 10.0);
         m.put("waitTimeSec", Math.round(v.getWaitTimeSeconds() * 10.0) / 10.0);

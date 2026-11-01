@@ -12,6 +12,7 @@ import com.traffic.core.routing.Route;
 import com.traffic.core.vehicle.Vehicle;
 import com.traffic.core.vehicle.VehicleStatus;
 import com.traffic.core.vehicle.VehicleType;
+import com.traffic.desktop.GhostVehicle;
 import java.util.List;
 import javafx.geometry.VPos;
 import javafx.scene.canvas.GraphicsContext;
@@ -55,6 +56,22 @@ public class MapCanvasRenderer {
     }
 
     public void render(GraphicsContext gc, CityMap cityMap, List<Vehicle> vehicles, Vehicle selectedVehicle, Route previewRoute, double width, double height) {
+        renderCore(gc, cityMap, vehicles, null, selectedVehicle, null, previewRoute, width, height);
+    }
+
+    /**
+     * Render with GhostVehicles from the backend (connected mode).
+     * selectedGhostId highlights that ghost vehicle.
+     */
+    public void renderWithGhosts(GraphicsContext gc, CityMap cityMap, List<GhostVehicle> ghosts,
+                                  String selectedGhostId, Route previewRoute, double width, double height) {
+        renderCore(gc, cityMap, null, ghosts, null, selectedGhostId, previewRoute, width, height);
+    }
+
+    private void renderCore(GraphicsContext gc, CityMap cityMap,
+                            List<Vehicle> vehicles, List<GhostVehicle> ghosts,
+                            Vehicle selectedVehicle, String selectedGhostId,
+                            Route previewRoute, double width, double height) {
         // 1. Dark City Background
         gc.setFill(COLOR_BACKGROUND);
         gc.fillRect(0, 0, width, height);
@@ -97,12 +114,22 @@ public class MapCanvasRenderer {
             drawIntersection(gc, intersection);
         }
 
-        // Render Vehicles
+        // Render local Vehicles (offline/demo mode)
         if (vehicles != null) {
             for (Vehicle vehicle : vehicles) {
                 if (vehicle.getStatus() != VehicleStatus.COMPLETED) {
                     boolean isSelected = (selectedVehicle != null && selectedVehicle.equals(vehicle));
                     drawVehicle(gc, vehicle, isSelected);
+                }
+            }
+        }
+
+        // Render GhostVehicles from backend (connected mode)
+        if (ghosts != null) {
+            for (GhostVehicle ghost : ghosts) {
+                if (ghost.getStatus() != VehicleStatus.COMPLETED) {
+                    boolean isSelected = (selectedGhostId != null && selectedGhostId.equals(ghost.getId()));
+                    drawGhostVehicle(gc, ghost, isSelected);
                 }
             }
         }
@@ -229,6 +256,67 @@ public class MapCanvasRenderer {
         gc.setTextAlign(TextAlignment.CENTER);
         gc.setTextBaseline(VPos.CENTER);
         gc.fillText(vehicle.getId(), x, y - w / 2.0 - 9.5);
+    }
+
+    /**
+     * Draws a GhostVehicle (position received from backend WebSocket).
+     * Identical visual style to drawVehicle — same renderer, different data source.
+     */
+    private void drawGhostVehicle(GraphicsContext gc, GhostVehicle ghost, boolean isSelected) {
+        double x = ghost.getX();
+        double y = ghost.getY();
+        double angle = ghost.getHeadingAngle();
+        VehicleType type = ghost.getType();
+        double len = type.getLength();
+        double w   = type.getWidth();
+        Color bodyColor = Color.web(type.getColorHex());
+
+        gc.save();
+        gc.translate(x, y);
+        gc.rotate(Math.toDegrees(angle));
+
+        if (isSelected) {
+            gc.setStroke(Color.web("#38bdf8", 0.9));
+            gc.setLineWidth(2.5);
+            gc.strokeRoundRect(-len / 2.0 - 4.0, -w / 2.0 - 4.0, len + 8.0, w + 8.0, 5, 5);
+        }
+
+        gc.setFill(Color.web("#000000", 0.5));
+        gc.fillRoundRect(-len / 2.0 + 1.0, -w / 2.0 + 1.5, len, w, 3.5, 3.5);
+
+        gc.setFill(bodyColor);
+        gc.fillRoundRect(-len / 2.0, -w / 2.0, len, w, 3.5, 3.5);
+
+        gc.setStroke(Color.web("#020617", 0.9));
+        gc.setLineWidth(1.0);
+        gc.strokeRoundRect(-len / 2.0, -w / 2.0, len, w, 3.5, 3.5);
+
+        gc.setFill(Color.web("#020617", 0.8));
+        double windshieldW = w * 0.72;
+        double windshieldL = len * 0.30;
+        gc.fillRoundRect(0.0, -windshieldW / 2.0, windshieldL, windshieldW, 2, 2);
+
+        gc.setFill(Color.web("#fef08a"));
+        gc.fillOval(len / 2.0 - 2.5, -w / 2.0 + 1.0, 2.2, 2.2);
+        gc.fillOval(len / 2.0 - 2.5, w / 2.0 - 3.2, 2.2, 2.2);
+
+        gc.setFill(Color.web("#ef4444"));
+        gc.fillOval(-len / 2.0, -w / 2.0 + 1.0, 2.0, 2.0);
+        gc.fillOval(-len / 2.0, w / 2.0 - 3.0, 2.0, 2.0);
+
+        gc.restore();
+
+        // ID label tag
+        gc.setFill(Color.web("#0b1329", 0.88));
+        gc.fillRoundRect(x - 13.0, y - w / 2.0 - 15.0, 26.0, 11.0, 3, 3);
+        gc.setStroke(bodyColor);
+        gc.setLineWidth(0.8);
+        gc.strokeRoundRect(x - 13.0, y - w / 2.0 - 15.0, 26.0, 11.0, 3, 3);
+        gc.setFill(Color.WHITE);
+        gc.setFont(Font.font("Segoe UI", FontWeight.BOLD, 8.0));
+        gc.setTextAlign(TextAlignment.CENTER);
+        gc.setTextBaseline(VPos.CENTER);
+        gc.fillText(ghost.getId(), x, y - w / 2.0 - 9.5);
     }
 
     private void drawSubtleGrid(GraphicsContext gc, double width, double height) {
