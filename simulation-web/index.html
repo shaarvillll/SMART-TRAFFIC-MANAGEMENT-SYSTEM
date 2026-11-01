@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Smart Traffic Simulation — Live</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='28' font-size='28'>🚦</text></svg>">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <!-- ── Header ──────────────────────────────────────────────────────────── -->
+  <header class="app-header">
+    <div class="header-left">
+      <span class="logo">🚦</span>
+      <div>
+        <div class="header-title">Smart Traffic Simulation</div>
+        <div class="header-sub">Live · Connected to Deployed Backend</div>
+      </div>
+    </div>
+    <div class="header-center">
+      <div id="statusPill" class="status-pill connecting">
+        <span class="status-dot"></span>
+        <span id="statusText">Connecting…</span>
+      </div>
+      <div id="simClock" class="sim-clock">⏱ —</div>
+    </div>
+    <div class="header-right">
+      <button id="btnPause" class="ctrl-btn" title="Pause / Resume">⏸ Pause</button>
+      <button id="btnReset" class="ctrl-btn danger" title="Reset simulation">↺ Reset</button>
+    </div>
+  </header>
+
+  <!-- ── Main Layout ─────────────────────────────────────────────────────── -->
+  <div class="main-layout">
+
+    <!-- Canvas area -->
+    <div class="canvas-wrap" id="canvasWrap">
+      <canvas id="simCanvas"></canvas>
+      <div id="coldStartOverlay" class="cold-start-overlay">
+        <div class="cold-start-box">
+          <div class="spinner"></div>
+          <div class="cold-title">Waking up backend…</div>
+          <div class="cold-sub">Render free tier may take 30–60 s on first load.</div>
+          <div id="coldAttempt" class="cold-attempt"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Right sidebar -->
+    <aside class="sidebar">
+
+      <!-- Add Vehicle panel -->
+      <section class="panel">
+        <div class="panel-title">🚗 Add Vehicle</div>
+        <label class="field-label">Type</label>
+        <select id="vehType" class="select">
+          <option value="CAR">🚗 Car</option>
+          <option value="BUS">🚌 Bus</option>
+          <option value="AMBULANCE">🚑 Ambulance</option>
+        </select>
+        <label class="field-label">From</label>
+        <select id="vehFrom" class="select"></select>
+        <label class="field-label">To</label>
+        <select id="vehTo" class="select"></select>
+        <div id="routePreview" class="route-preview hidden"></div>
+        <button id="btnSpawn" class="spawn-btn">➕ Spawn Vehicle</button>
+        <div id="spawnMsg" class="spawn-msg"></div>
+      </section>
+
+      <!-- Traffic controls -->
+      <section class="panel">
+        <div class="panel-title">🚧 Traffic Controls</div>
+        <div class="ctrl-grid">
+          <button class="cong-btn amber" data-action="rush_hour">Rush Hour</button>
+          <button class="cong-btn green" data-action="clear_all">Clear All</button>
+          <button class="cong-btn red"   data-action="close_R8">Close R8</button>
+          <button class="cong-btn amber" data-action="congest_R8">Congest R8</button>
+          <button class="cong-btn green" data-action="normal_R8">Normal R8</button>
+        </div>
+      </section>
+
+      <!-- Speed control -->
+      <section class="panel">
+        <div class="panel-title">⏩ Simulation Speed</div>
+        <div class="speed-row">
+          <button class="speed-btn" data-speed="0.5">½×</button>
+          <button class="speed-btn active" data-speed="1">1×</button>
+          <button class="speed-btn" data-speed="2">2×</button>
+          <button class="speed-btn" data-speed="4">4×</button>
+        </div>
+      </section>
+
+      <!-- Live stats -->
+      <section class="panel">
+        <div class="panel-title">📊 Live Stats</div>
+        <div class="stats-grid">
+          <div class="stat-item">
+            <div id="statTotal" class="stat-val">—</div>
+            <div class="stat-lbl">Total Vehicles</div>
+          </div>
+          <div class="stat-item">
+            <div id="statMoving" class="stat-val green">—</div>
+            <div class="stat-lbl">Moving</div>
+          </div>
+          <div class="stat-item">
+            <div id="statStopped" class="stat-val red">—</div>
+            <div class="stat-lbl">At Signal</div>
+          </div>
+          <div class="stat-item">
+            <div id="statDone" class="stat-val slate">—</div>
+            <div class="stat-lbl">Completed</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Vehicle fleet -->
+      <section class="panel fleet-panel">
+        <div class="panel-title">🚦 Fleet Monitor</div>
+        <div id="fleetList" class="fleet-list">
+          <div class="fleet-empty">Waiting for live data…</div>
+        </div>
+      </section>
+    </aside>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
